@@ -7,7 +7,8 @@ import {
   teamForm,
   searchTeams,
   budgetStatus,
-} from "./src/apiFootball.js";
+  activeProvider,
+} from "./src/provider.js";
 import {
   lastFiveYears,
   h2hScore,
@@ -38,6 +39,12 @@ const MAJOR_LEAGUES = {
   233: { name: "Egyptian Premier League", country: "Egypt", continent: "Africa" },
   200: { name: "Botola Pro", country: "Morocco", continent: "Africa" },
   399: { name: "NPFL", country: "Nigeria", continent: "Africa" },
+  // extra leagues available on the football-data.org fallback
+  88: { name: "Eredivisie", country: "Netherlands", continent: "Europe" },
+  94: { name: "Primeira Liga", country: "Portugal", continent: "Europe" },
+  40: { name: "Championship", country: "England", continent: "Europe" },
+  1: { name: "World Cup", country: "International", continent: "Europe" },
+  4: { name: "Euro Championship", country: "International", continent: "Europe" },
 };
 
 const isMajor = (f) => MAJOR_LEAGUES[f.league.id] !== undefined;
@@ -62,7 +69,7 @@ function slimFixture(f) {
 /* ------------ ROUTES ------------ */
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, budget: budgetStatus() });
+  res.json({ ok: true, provider: activeProvider(), budget: budgetStatus() });
 });
 
 /** MENU 1 — Today's games (filter with ?continent=Europe&country=England) */
