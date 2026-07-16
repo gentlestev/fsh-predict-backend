@@ -36,18 +36,38 @@ async function fdFetch(path, ttl) {
   const cached = getCache(path);
   if (cached) return { data: cached, fromCache: true };
 
-  const now = Date.now();
-  minuteWindow = minuteWindow.filter((t) => now - t < 60_000);
+  // in-flight dedup: identical concurrent requests share one fetch
+  if (pendingReqs.has(path)) return pendingReqs.get(path);
+  const p = fdFetchFresh(path, ttl).finally(() => pendingReqs.delete(path));
+  pendingReqs.set(path, p);
+  return p;
+}
+
+const pendingReqs = new Map();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fdFetchFresh(path, ttl) {
+  // wait for a slot instead of failing (FD free = 10/min; we cap at 8)
+  for (let tries = 0; tries < 4; tries++) {
+    const now = Date.now();
+    minuteWindow = minuteWindow.filter((t) => now - t < 60_000);
+    if (minuteWindow.length < 8) break;
+    const waitMs = Math.min(60_000 - (now - minuteWindow[0]) + 300, 20_000);
+    await sleep(waitMs);
+  }
+  minuteWindow = minuteWindow.filter((t) => Date.now() - t < 60_000);
   if (minuteWindow.length >= 8) {
     const stale = cache.get(path);
     if (stale) return { data: stale.data, fromCache: true, stale: true };
-    const err = new Error("football-data.org rate guard hit — retry shortly");
-    err.code = "THROTTLE";
-    throw err;
+    throw new Error("football-data.org is busy — try again in a minute");
   }
-  minuteWindow.push(now);
+  minuteWindow.push(Date.now());
 
-  const res = await fetch(`${BASE}${path}`, { headers: { "X-Auth-Token": KEY } });
+  let res = await fetch(`${BASE}${path}`, { headers: { "X-Auth-Token": KEY } });
+  if (res.status === 429) {
+    await sleep(15_000); // one polite retry on provider-side rate limit
+    res = await fetch(`${BASE}${path}`, { headers: { "X-Auth-Token": KEY } });
+  }
   if (!res.ok) {
     const stale = cache.get(path);
     if (stale) return { data: stale.data, fromCache: true, stale: true };
@@ -163,7 +183,7 @@ export async function fdHeadToHead(teamA, teamB) {
 }
 
 export async function fdTeamForm(teamId, last = 10) {
-  const { data } = await fdTeamMatches(teamId, 50);
+  const { data } = await fdTeamMatches(teamId, 100); // shares cache with H2H lookup
   // most recent first
   const sorted = [...data].sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date));
   return { data: sorted.slice(0, last), fromCache: true };
