@@ -124,7 +124,7 @@ app.get("/api/h2h/:homeId/:awayId", async (req, res) => {
     } catch (e) {
       if (providerHint) {
         return res.status(503).json({
-          error: `That provider is temporarily unavailable for this lookup — please search for both teams again.`,
+          error: `H2H lookup failed on ${providerHint}: ${e.message}`,
         });
       }
       throw e;
