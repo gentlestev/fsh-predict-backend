@@ -8,6 +8,8 @@ import {
   searchTeams,
   budgetStatus,
   activeProvider,
+  headToHeadLocked,
+  teamFormLocked,
 } from "./src/provider.js";
 import {
   lastFiveYears,
@@ -90,8 +92,8 @@ app.get("/api/teams/search", async (req, res) => {
   try {
     const q = (req.query.q || "").trim();
     if (q.length < 3) return res.json({ teams: [] });
-    const { data } = await searchTeams(q);
-    res.json({ teams: data.map((t) => ({ id: t.team.id, name: t.team.name, logo: t.team.logo, country: t.team.country })) });
+    const { data, provider } = await searchTeams(q);
+    res.json({ provider, teams: data.map((t) => ({ id: t.team.id, name: t.team.name, logo: t.team.logo, country: t.team.country })) });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
@@ -102,12 +104,31 @@ app.get("/api/h2h/:homeId/:awayId", async (req, res) => {
   try {
     const homeId = Number(req.params.homeId);
     const awayId = Number(req.params.awayId);
+    const providerHint = req.query.provider; // "apifootball" | "footballdata" | undefined
 
-    const [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
-      headToHead(homeId, awayId, 20),
-      teamForm(homeId, 10),
-      teamForm(awayId, 10),
-    ]);
+    let h2hRaw, hForm, aForm;
+    try {
+      if (providerHint) {
+        [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
+          headToHeadLocked(providerHint, homeId, awayId, 20),
+          teamFormLocked(providerHint, homeId, 10),
+          teamFormLocked(providerHint, awayId, 10),
+        ]);
+      } else {
+        [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
+          headToHead(homeId, awayId, 20),
+          teamForm(homeId, 10),
+          teamForm(awayId, 10),
+        ]);
+      }
+    } catch (e) {
+      if (providerHint) {
+        return res.status(503).json({
+          error: `That provider is temporarily unavailable for this lookup — please search for both teams again.`,
+        });
+      }
+      throw e;
+    }
 
     const meetings = lastFiveYears(h2hRaw);
     const h2h = h2hScore(meetings, homeId, awayId);
