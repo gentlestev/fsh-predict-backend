@@ -15,6 +15,8 @@ import {
   formScore,
   preMatchModel,
   liveModel,
+  teamAttackRate,
+  correctScoreModel,
 } from "./src/predictor.js";
 
 const app = express();
@@ -162,10 +164,16 @@ async function ensureDailyScan(limit) {
       ]);
       const meetings = lastFiveYears(h2hRaw);
       if (meetings.length < 3) continue;
+      const h2h = h2hScore(meetings, homeId, awayId);
       const model = preMatchModel({
-        h2h: h2hScore(meetings, homeId, awayId),
+        h2h,
         homeForm: formScore(hForm, homeId),
         awayForm: formScore(aForm, awayId),
+      });
+      const correctScore = correctScoreModel({
+        h2h,
+        homeAttack: teamAttackRate(hForm, homeId),
+        awayAttack: teamAttackRate(aForm, awayId),
       });
       results.push({
         fixtureId: f.fixture.id,
@@ -175,6 +183,7 @@ async function ensureDailyScan(limit) {
         homeName: f.teams.home.name,
         awayName: f.teams.away.name,
         markets: model.markets,
+        correctScore,
       });
     } catch { /* skip fixture on budget/throttle */ }
   }
@@ -243,6 +252,39 @@ app.get("/api/daily-bomb", async (req, res) => {
     }
     candidates.sort((a, b) => a.p - b.p); // rarest signal first — the boldest bomb
     res.json({ fromCache, bombs: candidates.slice(0, 3) });
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
+});
+
+/**
+ * MENU 7 — Correct Score: the model's most likely exact scoreline per
+ * fixture, via a Poisson goal model (blends H2H-specific scoring, oriented
+ * to home/away, with each team's general recent attacking rate). Ranked by
+ * "confidence gap" — how much clearer the #1 pick is over the #2 pick —
+ * NOT by raw probability, since even the best single scoreline in football
+ * is usually only 10-30% likely. That's normal for this market, not a bug.
+ */
+app.get("/api/correct-score", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 8), 12);
+    const { results, fromCache } = await ensureDailyScan(limit);
+
+    const picks = results
+      .filter((r) => r.correctScore)
+      .map((r) => ({
+        fixtureId: r.fixtureId,
+        match: r.match,
+        league: r.league,
+        kickoff: r.kickoff,
+        score: r.correctScore.top.score,
+        p: r.correctScore.top.p,
+        runnerUp: r.correctScore.second,
+        confidenceGap: r.correctScore.confidenceGap,
+      }))
+      .sort((a, b) => b.confidenceGap - a.confidenceGap);
+
+    res.json({ fromCache, picks });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
