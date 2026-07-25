@@ -132,15 +132,16 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 
 export async function fdFixturesToday() {
   const d = todayStr();
-  const { data, fromCache } = await fdFetch(`/matches?dateFrom=${d}&dateTo=${d}`, TTL.TODAY);
-  return { data: (data.matches || []).map(toAFShape), fromCache };
+  const next = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+  // dateTo can behave exclusively on FD's API — query a 2-day window, filter to today
+  const { data, fromCache } = await fdFetch(`/matches?dateFrom=${d}&dateTo=${next}`, TTL.TODAY);
+  const todays = (data.matches || []).filter((m) => (m.utcDate || "").slice(0, 10) === d);
+  return { data: todays.map(toAFShape), fromCache };
 }
 
 export async function fdFixturesLive() {
-  const d = todayStr();
-  const { data, fromCache } = await fdFetch(`/matches?dateFrom=${d}&dateTo=${d}`, TTL.LIVE);
-  const live = (data.matches || []).filter((m) => ["IN_PLAY", "PAUSED"].includes(m.status));
-  return { data: live.map(toAFShape), fromCache };
+  const { data, fromCache } = await fdFetch(`/matches?status=LIVE`, TTL.LIVE);
+  return { data: (data.matches || []).map(toAFShape), fromCache };
 }
 
 /** Team search: pull squads of the big-5 comps once/day, filter locally. */
@@ -168,14 +169,44 @@ export async function fdSearchTeams(q) {
 }
 
 /** A team's finished matches (used for both form and H2H filtering). */
-export async function fdTeamMatches(teamId, limit = 100) {
-  const { data, fromCache } = await fdFetch(`/teams/${teamId}/matches?status=FINISHED&limit=${limit}`, TTL.MATCHES);
-  return { data: (data.matches || []).map(toAFShape), fromCache };
+/** A team's finished matches over the last ~3 years, chunked into yearly
+ *  requests (the "limit" param alone doesn't reliably widen the window on
+ *  this endpoint — an explicit date range does). Each chunk is cached
+ *  separately, so repeat lookups involving the same team are cheap. */
+export async function fdTeamMatches(teamId) {
+  const now = new Date();
+  const chunks = [];
+  for (let i = 0; i < 3; i++) {
+    const to = new Date(now); to.setFullYear(to.getFullYear() - i);
+    const from = new Date(to); from.setFullYear(from.getFullYear() - 1);
+    chunks.push({
+      from: from.toISOString().slice(0, 10),
+      to: to.toISOString().slice(0, 10),
+    });
+  }
+
+  const results = await Promise.all(
+    chunks.map((c) =>
+      fdFetch(`/teams/${teamId}/matches?dateFrom=${c.from}&dateTo=${c.to}&status=FINISHED`, TTL.MATCHES)
+        .catch(() => ({ data: { matches: [] }, fromCache: false }))
+    )
+  );
+
+  const seen = new Set();
+  const merged = [];
+  let fromCache = true;
+  for (const r of results) {
+    if (!r.fromCache) fromCache = false;
+    for (const m of r.data.matches || []) {
+      if (!seen.has(m.id)) { seen.add(m.id); merged.push(m); }
+    }
+  }
+  return { data: merged.map(toAFShape), fromCache };
 }
 
 /** H2H: intersect one team's match history with the opponent. */
 export async function fdHeadToHead(teamA, teamB) {
-  const { data } = await fdTeamMatches(teamA, 100);
+  const { data } = await fdTeamMatches(teamA);
   const meetings = data.filter(
     (f) => f.teams.home.id === teamB || f.teams.away.id === teamB
   );
@@ -183,7 +214,7 @@ export async function fdHeadToHead(teamA, teamB) {
 }
 
 export async function fdTeamForm(teamId, last = 10) {
-  const { data } = await fdTeamMatches(teamId, 100); // shares cache with H2H lookup
+  const { data } = await fdTeamMatches(teamId); // shares cache with H2H lookup
   // most recent first
   const sorted = [...data].sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date));
   return { data: sorted.slice(0, last), fromCache: true };
