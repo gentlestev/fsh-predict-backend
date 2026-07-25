@@ -57,3 +57,18 @@ export const teamForm      = (id, last = 10) =>
   withFallback(() => AF.teamForm(id, last), () => fdTeamForm(id, last));
 
 export const budgetStatus = AF.budgetStatus;
+
+/**
+ * Provider-LOCKED lookups — used once a team search has already returned
+ * IDs from a specific provider. IDs are NOT compatible across providers,
+ * so these never cross-fallback; they just fail clearly if that provider
+ * is temporarily unavailable, so the frontend can prompt a fresh search.
+ */
+export async function headToHeadLocked(provider, a, b, last = 20) {
+  if (provider === "footballdata") return { ...(await fdHeadToHead(a, b)), provider };
+  return { ...(await AF.headToHead(a, b, last)), provider };
+}
+export async function teamFormLocked(provider, id, last = 10) {
+  if (provider === "footballdata") return { ...(await fdTeamForm(id, last)), provider };
+  return { ...(await AF.teamForm(id, last)), provider };
+}
