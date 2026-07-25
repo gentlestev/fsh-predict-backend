@@ -53,6 +53,9 @@ export const TTL = {
   ODDS: 3 * 60 * 60 * 1000,            // 3h
 };
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const pendingReqs = new Map();
+
 async function rawFetch(path) {
   resetBudgetIfNewDay();
 
@@ -62,20 +65,34 @@ async function rawFetch(path) {
     throw err;
   }
 
-  // per-minute throttle (free tier: 10/min → we cap at 8)
-  const now = Date.now();
-  minuteWindow = minuteWindow.filter((t) => now - t < 60_000);
+  // per-minute throttle (free tier: 10/min → we cap at 8) — wait for a slot
+  // instead of failing outright; a Stats analysis fires 3 requests at once,
+  // so a brief queue here is normal, not an error.
+  for (let tries = 0; tries < 4; tries++) {
+    const now = Date.now();
+    minuteWindow = minuteWindow.filter((t) => now - t < 60_000);
+    if (minuteWindow.length < 8) break;
+    const waitMs = Math.min(60_000 - (now - minuteWindow[0]) + 300, 20_000);
+    await sleep(waitMs);
+  }
+  minuteWindow = minuteWindow.filter((t) => Date.now() - t < 60_000);
   if (minuteWindow.length >= 8) {
-    const err = new Error("Per-minute rate guard hit — retry shortly");
+    const err = new Error("API-Football is busy — try again in a minute");
     err.code = "THROTTLE";
     throw err;
   }
-  minuteWindow.push(now);
+  minuteWindow.push(Date.now());
 
-  const res = await fetch(`${BASE}${path}`, {
+  let res = await fetch(`${BASE}${path}`, {
     headers: { "x-apisports-key": KEY },
   });
   usedToday += 1;
+
+  if (res.status === 429) {
+    await sleep(15_000); // one polite retry if API-Football itself rate-limited us
+    res = await fetch(`${BASE}${path}`, { headers: { "x-apisports-key": KEY } });
+    usedToday += 1;
+  }
 
   if (!res.ok) throw new Error(`API-Football ${res.status} on ${path}`);
   const json = await res.json();
@@ -87,17 +104,33 @@ async function rawFetch(path) {
 
 /**
  * Cached fetch. On budget/throttle errors, serves stale cache if present.
+ * Concurrent identical requests share one in-flight fetch instead of each
+ * burning their own slot.
  */
 export async function apiGet(path, ttl) {
   const cached = getCache(path);
   if (cached) return { data: cached, fromCache: true };
 
+  if (pendingReqs.has(path)) {
+    const data = await pendingReqs.get(path);
+    return { data, fromCache: false };
+  }
+
+  const p = (async () => {
+    try {
+      const data = await rawFetch(path);
+      setCache(path, data, ttl);
+      return data;
+    } finally {
+      pendingReqs.delete(path);
+    }
+  })();
+  pendingReqs.set(path, p);
+
   try {
-    const data = await rawFetch(path);
-    setCache(path, data, ttl);
+    const data = await p;
     return { data, fromCache: false };
   } catch (e) {
-    // last resort: expired cache is better than nothing
     const stale = cache.get(path);
     if (stale) return { data: stale.data, fromCache: true, stale: true };
     throw e;
