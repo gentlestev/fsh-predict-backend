@@ -1,15 +1,16 @@
 /**
  * API-Football client with:
  *  - in-memory cache (TTL per data type)
- *  - daily request budget guard (free tier = 100/day)
- *  - per-minute throttle (free tier = 10/min)
+ *  - configurable daily budget guard (set DAILY_BUDGET env var to match your plan)
+ *  - configurable per-minute throttle (set REQUESTS_PER_MINUTE to match your plan)
  */
 
 const BASE = "https://v3.football.api-sports.io";
 const KEY = process.env.APIFOOTBALL_KEY;
 
 // ---- Request budget ----
-const DAILY_BUDGET = Number(process.env.DAILY_BUDGET || 95); // keep 5 in reserve
+const DAILY_BUDGET = Number(process.env.DAILY_BUDGET || 95);
+const PER_MINUTE_CAP = Number(process.env.REQUESTS_PER_MINUTE || 8);
 let usedToday = 0;
 let budgetDate = new Date().toISOString().slice(0, 10);
 
@@ -43,7 +44,7 @@ function setCache(key, data, ttlMs) {
   cache.set(key, { expires: Date.now() + ttlMs, data });
 }
 
-// TTLs — the free tier survives on these
+// TTLs
 export const TTL = {
   FIXTURES_TODAY: 60 * 60 * 1000,      // 1h  (kickoff times don't move)
   LIVE: 90 * 1000,                     // 90s (live polling)
@@ -71,12 +72,12 @@ async function rawFetch(path) {
   for (let tries = 0; tries < 4; tries++) {
     const now = Date.now();
     minuteWindow = minuteWindow.filter((t) => now - t < 60_000);
-    if (minuteWindow.length < 8) break;
+    if (minuteWindow.length < PER_MINUTE_CAP) break;
     const waitMs = Math.min(60_000 - (now - minuteWindow[0]) + 300, 20_000);
     await sleep(waitMs);
   }
   minuteWindow = minuteWindow.filter((t) => Date.now() - t < 60_000);
-  if (minuteWindow.length >= 8) {
+  if (minuteWindow.length >= PER_MINUTE_CAP) {
     const err = new Error("API-Football is busy — try again in a minute");
     err.code = "THROTTLE";
     throw err;
@@ -151,33 +152,14 @@ export async function fixturesLive() {
   return apiGet(`/fixtures?live=all`, TTL.LIVE);
 }
 
-/** Head-to-head — ALL historical meetings (free plan can't filter server-side
- *  with &last=; predictor.js already trims to the last 5 years downstream). */
-export async function headToHead(teamA, teamB) {
-  return apiGet(`/fixtures/headtohead?h2h=${teamA}-${teamB}`, TTL.H2H);
+/** Head-to-head, last N meetings between two team IDs. */
+export async function headToHead(teamA, teamB, last = 20) {
+  return apiGet(`/fixtures/headtohead?h2h=${teamA}-${teamB}&last=${last}`, TTL.H2H);
 }
 
-/** A team's recent fixtures (form). Free plan needs team+season (no &last=),
- *  so we pull the current season (and last season as a fallback early in a
- *  new season) and trim to the most recent N finished matches ourselves. */
+/** A team's last N fixtures (form). */
 export async function teamForm(teamId, last = 10) {
-  const now = new Date();
-  const y = now.getFullYear();
-  // European-style seasons start ~August; before that, the "current" season
-  // for standings purposes is still the previous year's start.
-  const season = now.getMonth() >= 6 ? y : y - 1; // Jul(6)+ => this year's season
-
-  const [{ data: cur }, { data: prev }] = await Promise.all([
-    apiGet(`/fixtures?team=${teamId}&season=${season}`, TTL.TEAM_FORM),
-    apiGet(`/fixtures?team=${teamId}&season=${season - 1}`, TTL.TEAM_FORM).catch(() => ({ data: [] })),
-  ]);
-
-  const merged = [...(cur || []), ...(prev || [])]
-    .filter((f) => f.fixture.status.short === "FT")
-    .sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))
-    .slice(0, last);
-
-  return { data: merged, fromCache: false };
+  return apiGet(`/fixtures?team=${teamId}&last=${last}`, TTL.TEAM_FORM);
 }
 
 /** Search teams by name (for the Stats menu selectors). */
