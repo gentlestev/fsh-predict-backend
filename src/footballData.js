@@ -176,7 +176,7 @@ export async function fdSearchTeams(q) {
 export async function fdTeamMatches(teamId) {
   const now = new Date();
   const chunks = [];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 5; i++) {
     const to = new Date(now); to.setFullYear(to.getFullYear() - i);
     const from = new Date(to); from.setFullYear(from.getFullYear() - 1);
     chunks.push({
