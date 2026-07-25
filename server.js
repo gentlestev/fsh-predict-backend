@@ -10,6 +10,10 @@ import {
   activeProvider,
   headToHeadLocked,
   teamFormLocked,
+  statsSearchTeams,
+  statsHeadToHead,
+  statsTeamForm,
+  statsFixturesToday,
 } from "./src/provider.js";
 import {
   lastFiveYears,
@@ -92,43 +96,27 @@ app.get("/api/teams/search", async (req, res) => {
   try {
     const q = (req.query.q || "").trim();
     if (q.length < 3) return res.json({ teams: [] });
-    const { data, provider } = await searchTeams(q);
+    const { data, provider } = await statsSearchTeams(q);
     res.json({ provider, teams: data.map((t) => ({ id: t.team.id, name: t.team.name, logo: t.team.logo, country: t.team.country })) });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
 });
 
-/** MENU 2 — Stats: H2H analysis + prediction for two team IDs */
+/** MENU 2 — Stats: H2H analysis + prediction for two team IDs.
+ *  Always uses football-data.org (see statsHeadToHead/statsTeamForm) —
+ *  API-Football's free plan restricts current-season data, which this
+ *  feature needs. */
 app.get("/api/h2h/:homeId/:awayId", async (req, res) => {
   try {
     const homeId = Number(req.params.homeId);
     const awayId = Number(req.params.awayId);
-    const providerHint = req.query.provider; // "apifootball" | "footballdata" | undefined
 
-    let h2hRaw, hForm, aForm;
-    try {
-      if (providerHint) {
-        [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
-          headToHeadLocked(providerHint, homeId, awayId, 20),
-          teamFormLocked(providerHint, homeId, 10),
-          teamFormLocked(providerHint, awayId, 10),
-        ]);
-      } else {
-        [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
-          headToHead(homeId, awayId, 20),
-          teamForm(homeId, 10),
-          teamForm(awayId, 10),
-        ]);
-      }
-    } catch (e) {
-      if (providerHint) {
-        return res.status(503).json({
-          error: `H2H lookup failed on ${providerHint}: ${e.message}`,
-        });
-      }
-      throw e;
-    }
+    const [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
+      statsHeadToHead(homeId, awayId),
+      statsTeamForm(homeId, 10),
+      statsTeamForm(awayId, 10),
+    ]);
 
     const meetings = lastFiveYears(h2hRaw);
     const h2h = h2hScore(meetings, homeId, awayId);
@@ -168,7 +156,7 @@ app.get("/api/top-predictions", async (req, res) => {
       return res.json({ fromCache: true, picks: topPicksCache.picks });
     }
 
-    const { data } = await fixturesToday();
+    const { data } = await statsFixturesToday();
     const majors = data.filter(isMajor).filter((f) => f.fixture.status.short === "NS");
     const limit = Math.min(Number(req.query.limit || 8), 12); // budget guard
     const picks = [];
@@ -177,9 +165,9 @@ app.get("/api/top-predictions", async (req, res) => {
       try {
         const homeId = f.teams.home.id, awayId = f.teams.away.id;
         const [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
-          headToHead(homeId, awayId, 20),
-          teamForm(homeId, 10),
-          teamForm(awayId, 10),
+          statsHeadToHead(homeId, awayId),
+          statsTeamForm(homeId, 10),
+          statsTeamForm(awayId, 10),
         ]);
         const meetings = lastFiveYears(h2hRaw);
         if (meetings.length < 3) continue;
