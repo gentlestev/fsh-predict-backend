@@ -72,6 +72,7 @@ export function h2hScore(meetings, homeTeamId, awayTeamId) {
   }
 
   const n = meetings.length || 1;
+  const years = meetings.map((f) => new Date(f.fixture.date).getFullYear());
   return {
     homeRate: total ? home / total : 0.4,
     drawRate: total ? draw / total : 0.25,
@@ -80,6 +81,8 @@ export function h2hScore(meetings, homeTeamId, awayTeamId) {
     bttsRate: bttsCount / n,
     over25Rate: over25 / n,
     meetings: meetings.length,
+    earliestYear: years.length ? Math.min(...years) : null,
+    latestYear: years.length ? Math.max(...years) : null,
   };
 }
 
