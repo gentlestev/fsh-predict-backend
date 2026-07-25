@@ -8,12 +8,6 @@ import {
   searchTeams,
   budgetStatus,
   activeProvider,
-  headToHeadLocked,
-  teamFormLocked,
-  statsSearchTeams,
-  statsHeadToHead,
-  statsTeamForm,
-  statsFixturesToday,
 } from "./src/provider.js";
 import {
   lastFiveYears,
@@ -27,7 +21,9 @@ const app = express();
 app.use(cors()); // allow the GitHub Pages frontend
 app.use(express.json());
 
-// Major league IDs on API-Football (v3) — used to filter "major matches"
+// Curated league metadata — used to give Today's Games nice names/continent
+// grouping. Live Scores and Live Predictions do NOT filter by this list
+// (see below), so any club in any competition API-Football covers will show.
 const MAJOR_LEAGUES = {
   39: { name: "Premier League", country: "England", continent: "Europe" },
   140: { name: "La Liga", country: "Spain", continent: "Europe" },
@@ -45,7 +41,6 @@ const MAJOR_LEAGUES = {
   233: { name: "Egyptian Premier League", country: "Egypt", continent: "Africa" },
   200: { name: "Botola Pro", country: "Morocco", continent: "Africa" },
   399: { name: "NPFL", country: "Nigeria", continent: "Africa" },
-  // extra leagues available on the football-data.org fallback
   88: { name: "Eredivisie", country: "Netherlands", continent: "Europe" },
   94: { name: "Primeira Liga", country: "Portugal", continent: "Europe" },
   40: { name: "Championship", country: "England", continent: "Europe" },
@@ -78,7 +73,7 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, provider: activeProvider(), budget: budgetStatus() });
 });
 
-/** MENU 1 — Today's games (filter with ?continent=Europe&country=England) */
+/** MENU 1 — Today's games, grouped by continent/country (curated list). */
 app.get("/api/today", async (req, res) => {
   try {
     const { data, fromCache } = await fixturesToday();
@@ -96,26 +91,23 @@ app.get("/api/teams/search", async (req, res) => {
   try {
     const q = (req.query.q || "").trim();
     if (q.length < 3) return res.json({ teams: [] });
-    const { data, provider } = await statsSearchTeams(q);
+    const { data, provider } = await searchTeams(q);
     res.json({ provider, teams: data.map((t) => ({ id: t.team.id, name: t.team.name, logo: t.team.logo, country: t.team.country })) });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
 });
 
-/** MENU 2 — Stats: H2H analysis + prediction for two team IDs.
- *  Always uses football-data.org (see statsHeadToHead/statsTeamForm) —
- *  API-Football's free plan restricts current-season data, which this
- *  feature needs. */
+/** MENU 2 — Stats: H2H analysis + prediction for two team IDs. */
 app.get("/api/h2h/:homeId/:awayId", async (req, res) => {
   try {
     const homeId = Number(req.params.homeId);
     const awayId = Number(req.params.awayId);
 
     const [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
-      statsHeadToHead(homeId, awayId),
-      statsTeamForm(homeId, 10),
-      statsTeamForm(awayId, 10),
+      headToHead(homeId, awayId, 20),
+      teamForm(homeId, 10),
+      teamForm(awayId, 10),
     ]);
 
     const meetings = lastFiveYears(h2hRaw);
@@ -144,8 +136,7 @@ app.get("/api/h2h/:homeId/:awayId", async (req, res) => {
 
 /**
  * MENU 3 — Top predictions of the day (≥70% only).
- * Budget-aware: analyses at most `limit` fixtures per call (each costs ~3 requests
- * on first run, then cached). Results cached for the whole day after first build.
+ * Analyses at most `limit` fixtures per call. Results cached for the day.
  */
 let topPicksCache = { date: null, picks: [] };
 
@@ -156,18 +147,18 @@ app.get("/api/top-predictions", async (req, res) => {
       return res.json({ fromCache: true, picks: topPicksCache.picks });
     }
 
-    const { data } = await statsFixturesToday();
+    const { data } = await fixturesToday();
     const majors = data.filter(isMajor).filter((f) => f.fixture.status.short === "NS");
-    const limit = Math.min(Number(req.query.limit || 8), 12); // budget guard
+    const limit = Math.min(Number(req.query.limit || 8), 12);
     const picks = [];
 
     for (const f of majors.slice(0, limit)) {
       try {
         const homeId = f.teams.home.id, awayId = f.teams.away.id;
         const [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
-          statsHeadToHead(homeId, awayId),
-          statsTeamForm(homeId, 10),
-          statsTeamForm(awayId, 10),
+          headToHead(homeId, awayId, 20),
+          teamForm(homeId, 10),
+          teamForm(awayId, 10),
         ]);
         const meetings = lastFiveYears(h2hRaw);
         if (meetings.length < 3) continue;
@@ -199,22 +190,24 @@ app.get("/api/top-predictions", async (req, res) => {
   }
 });
 
-/** MENU 4 — Live scores */
+/** MENU 4 — Live scores. Unfiltered — shows every live match API-Football
+ *  covers, not just the curated major-league list, so smaller clubs and
+ *  competitions (e.g. PSV in the Eredivisie, cup ties, etc.) show up too. */
 app.get("/api/live", async (_req, res) => {
   try {
     const { data, fromCache } = await fixturesLive();
-    res.json({ fromCache, matches: data.filter(isMajor).map(slimFixture) });
+    res.json({ fromCache, matches: data.map(slimFixture) });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
 });
 
-/** MENU 5 — Live predictions (after 25', ≥70% only) */
+/** MENU 5 — Live predictions (after 25', ≥70% only). Also unfiltered. */
 app.get("/api/live-predictions", async (_req, res) => {
   try {
     const { data, fromCache } = await fixturesLive();
     const results = [];
-    for (const f of data.filter(isMajor)) {
+    for (const f of data) {
       const preds = liveModel(f);
       if (preds.length > 0) {
         results.push({ fixture: slimFixture(f), predictions: preds });
@@ -233,12 +226,10 @@ app.get("/api/live-predictions", async (_req, res) => {
 app.get("/api/high-odds", async (_req, res) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
-    // reuse the day's analysed picks store; low-p markets are the long shots
     if (topPicksCache.date !== today) {
       return res.json({ picks: [], note: "Run /api/top-predictions first — analysis is shared to save your API budget." });
     }
-    // long shots are computed during top-predictions; simplest v1: invert threshold
-    res.json({ note: "v1: derive from same model run — markets under 35% are long shots. Extend by adding /odds endpoint when on paid tier.", picks: [] });
+    res.json({ note: "v1: derive from same model run — markets under 35% are long shots. Extend by adding /odds endpoint.", picks: [] });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
