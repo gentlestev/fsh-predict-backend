@@ -135,56 +135,114 @@ app.get("/api/h2h/:homeId/:awayId", async (req, res) => {
 });
 
 /**
- * MENU 3 — Top predictions of the day (≥70% only).
- * Analyses at most `limit` fixtures per call. Results cached for the day.
+ * Shared daily fixture scan — analyses each fixture ONCE per day and caches
+ * every market's probability. Both Top Predictions (>=70%) and Daily Bomb
+ * (long-shots) read from this same cache, so adding Daily Bomb costs zero
+ * extra API requests.
  */
-let topPicksCache = { date: null, picks: [] };
+let dailyScanCache = { date: null, results: [] };
 
+async function ensureDailyScan(limit) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (dailyScanCache.date === today && dailyScanCache.results.length > 0) {
+    return { results: dailyScanCache.results, fromCache: true };
+  }
+
+  const { data } = await fixturesToday();
+  const majors = data.filter(isMajor).filter((f) => f.fixture.status.short === "NS");
+  const results = [];
+
+  for (const f of majors.slice(0, limit)) {
+    try {
+      const homeId = f.teams.home.id, awayId = f.teams.away.id;
+      const [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
+        headToHead(homeId, awayId, 20),
+        teamForm(homeId, 10),
+        teamForm(awayId, 10),
+      ]);
+      const meetings = lastFiveYears(h2hRaw);
+      if (meetings.length < 3) continue;
+      const model = preMatchModel({
+        h2h: h2hScore(meetings, homeId, awayId),
+        homeForm: formScore(hForm, homeId),
+        awayForm: formScore(aForm, awayId),
+      });
+      results.push({
+        fixtureId: f.fixture.id,
+        match: `${f.teams.home.name} vs ${f.teams.away.name}`,
+        league: f.league.name,
+        kickoff: f.fixture.date,
+        homeName: f.teams.home.name,
+        awayName: f.teams.away.name,
+        markets: model.markets,
+      });
+    } catch { /* skip fixture on budget/throttle */ }
+  }
+
+  dailyScanCache = { date: today, results };
+  return { results, fromCache: false };
+}
+
+/**
+ * MENU 3 — Top predictions of the day (≥70% only). Reads the shared scan.
+ */
 app.get("/api/top-predictions", async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    if (topPicksCache.date === today && topPicksCache.picks.length > 0) {
-      return res.json({ fromCache: true, picks: topPicksCache.picks });
-    }
-
-    const { data } = await fixturesToday();
-    const majors = data.filter(isMajor).filter((f) => f.fixture.status.short === "NS");
     const limit = Math.min(Number(req.query.limit || 8), 12);
+    const { results, fromCache } = await ensureDailyScan(limit);
+
     const picks = [];
-
-    for (const f of majors.slice(0, limit)) {
-      try {
-        const homeId = f.teams.home.id, awayId = f.teams.away.id;
-        const [{ data: h2hRaw }, { data: hForm }, { data: aForm }] = await Promise.all([
-          headToHead(homeId, awayId, 20),
-          teamForm(homeId, 10),
-          teamForm(awayId, 10),
-        ]);
-        const meetings = lastFiveYears(h2hRaw);
-        if (meetings.length < 3) continue;
-        const model = preMatchModel({
-          h2h: h2hScore(meetings, homeId, awayId),
-          homeForm: formScore(hForm, homeId),
-          awayForm: formScore(aForm, awayId),
-        });
-        for (const mk of model.markets) {
-          if (mk.p >= 70) {
-            picks.push({
-              fixtureId: f.fixture.id,
-              match: `${f.teams.home.name} vs ${f.teams.away.name}`,
-              league: f.league.name,
-              kickoff: f.fixture.date,
-              market: mk.name.replace("Home", f.teams.home.name).replace("Away", f.teams.away.name),
-              p: mk.p,
-            });
-          }
+    for (const r of results) {
+      for (const mk of r.markets) {
+        if (mk.p >= 70) {
+          picks.push({
+            fixtureId: r.fixtureId,
+            match: r.match,
+            league: r.league,
+            kickoff: r.kickoff,
+            market: mk.name.replace("Home", r.homeName).replace("Away", r.awayName),
+            p: mk.p,
+          });
         }
-      } catch { /* skip fixture on budget/throttle */ }
+      }
     }
-
     picks.sort((a, b) => b.p - a.p);
-    topPicksCache = { date: today, picks };
-    res.json({ fromCache: false, picks });
+    res.json({ fromCache, picks });
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
+});
+
+/**
+ * MENU 6 — Daily Bomb: the model's boldest long-shot picks of the day.
+ * Deliberately LOW probability (8–42%) but backed by real signal (at least
+ * 3 qualifying meetings) rather than pure noise. "Implied odds" here are a
+ * model estimate (100/probability), NOT real bookmaker odds — we don't have
+ * an odds feed. Reuses the same daily scan as Top Predictions, so it's free.
+ */
+app.get("/api/daily-bomb", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 8), 12);
+    const { results, fromCache } = await ensureDailyScan(limit);
+
+    const candidates = [];
+    for (const r of results) {
+      for (const mk of r.markets) {
+        if (mk.p >= 8 && mk.p <= 42) {
+          candidates.push({
+            fixtureId: r.fixtureId,
+            match: r.match,
+            league: r.league,
+            kickoff: r.kickoff,
+            market: mk.name.replace("Home", r.homeName).replace("Away", r.awayName),
+            p: mk.p,
+            impliedOdds: Math.round((100 / mk.p) * 100) / 100,
+          });
+        }
+      }
+    }
+    candidates.sort((a, b) => a.p - b.p); // rarest signal first — the boldest bomb
+    res.json({ fromCache, bombs: candidates.slice(0, 3) });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
@@ -214,22 +272,6 @@ app.get("/api/live-predictions", async (_req, res) => {
       }
     }
     res.json({ fromCache, results });
-  } catch (e) {
-    res.status(503).json({ error: e.message });
-  }
-});
-
-/**
- * MENU 6 — High odds picks: markets the model rates LOW probability
- * (long shots) from today's analysed fixtures.
- */
-app.get("/api/high-odds", async (_req, res) => {
-  try {
-    const today = new Date().toISOString().slice(0, 10);
-    if (topPicksCache.date !== today) {
-      return res.json({ picks: [], note: "Run /api/top-predictions first — analysis is shared to save your API budget." });
-    }
-    res.json({ note: "v1: derive from same model run — markets under 35% are long shots. Extend by adding /odds endpoint.", picks: [] });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
