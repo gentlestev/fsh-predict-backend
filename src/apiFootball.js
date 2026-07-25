@@ -151,14 +151,33 @@ export async function fixturesLive() {
   return apiGet(`/fixtures?live=all`, TTL.LIVE);
 }
 
-/** Head-to-head, last N meetings between two team IDs. */
-export async function headToHead(teamA, teamB, last = 20) {
-  return apiGet(`/fixtures/headtohead?h2h=${teamA}-${teamB}&last=${last}`, TTL.H2H);
+/** Head-to-head — ALL historical meetings (free plan can't filter server-side
+ *  with &last=; predictor.js already trims to the last 5 years downstream). */
+export async function headToHead(teamA, teamB) {
+  return apiGet(`/fixtures/headtohead?h2h=${teamA}-${teamB}`, TTL.H2H);
 }
 
-/** A team's last N fixtures (form). */
+/** A team's recent fixtures (form). Free plan needs team+season (no &last=),
+ *  so we pull the current season (and last season as a fallback early in a
+ *  new season) and trim to the most recent N finished matches ourselves. */
 export async function teamForm(teamId, last = 10) {
-  return apiGet(`/fixtures?team=${teamId}&last=${last}`, TTL.TEAM_FORM);
+  const now = new Date();
+  const y = now.getFullYear();
+  // European-style seasons start ~August; before that, the "current" season
+  // for standings purposes is still the previous year's start.
+  const season = now.getMonth() >= 6 ? y : y - 1; // Jul(6)+ => this year's season
+
+  const [{ data: cur }, { data: prev }] = await Promise.all([
+    apiGet(`/fixtures?team=${teamId}&season=${season}`, TTL.TEAM_FORM),
+    apiGet(`/fixtures?team=${teamId}&season=${season - 1}`, TTL.TEAM_FORM).catch(() => ({ data: [] })),
+  ]);
+
+  const merged = [...(cur || []), ...(prev || [])]
+    .filter((f) => f.fixture.status.short === "FT")
+    .sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date))
+    .slice(0, last);
+
+  return { data: merged, fromCache: false };
 }
 
 /** Search teams by name (for the Stats menu selectors). */
