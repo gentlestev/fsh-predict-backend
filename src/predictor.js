@@ -52,6 +52,7 @@ export function formScore(fixtures, teamId) {
 export function h2hScore(meetings, homeTeamId, awayTeamId) {
   let home = 0, away = 0, draw = 0, total = 0;
   let goalsSum = 0, bttsCount = 0, over25 = 0;
+  let homeGoalsSum = 0, awayGoalsSum = 0;
 
   for (const f of meetings) {
     const w = recencyWeight(f.fixture.date);
@@ -67,6 +68,8 @@ export function h2hScore(meetings, homeTeamId, awayTeamId) {
     else draw += w;
 
     goalsSum += hg + ag;
+    homeGoalsSum += homeGoals;
+    awayGoalsSum += awayGoals;
     if (hg > 0 && ag > 0) bttsCount += 1;
     if (hg + ag > 2) over25 += 1;
   }
@@ -78,6 +81,8 @@ export function h2hScore(meetings, homeTeamId, awayTeamId) {
     drawRate: total ? draw / total : 0.25,
     awayRate: total ? away / total : 0.35,
     avgGoals: goalsSum / n,
+    avgHomeGoals: homeGoalsSum / n,
+    avgAwayGoals: awayGoalsSum / n,
     bttsRate: bttsCount / n,
     over25Rate: over25 / n,
     meetings: meetings.length,
@@ -131,6 +136,66 @@ export function preMatchModel({ h2h, homeForm, awayForm }) {
 
 function clamp(x, lo, hi) {
   return Math.max(lo, Math.min(hi, x));
+}
+
+/** Average goals a team has scored in its own recent finished fixtures,
+ *  regardless of venue — used as a general attacking-strength input. */
+export function teamAttackRate(fixtures, teamId) {
+  const finished = fixtures.filter((f) => f.fixture.status.short === "FT");
+  if (finished.length === 0) return 1.3; // league-average-ish fallback
+  const total = finished.reduce((sum, f) => {
+    const isHome = f.teams.home.id === teamId;
+    return sum + (isHome ? f.goals.home : f.goals.away);
+  }, 0);
+  return total / finished.length;
+}
+
+function factorial(n) {
+  let r = 1;
+  for (let i = 2; i <= n; i++) r *= i;
+  return r;
+}
+
+/** Poisson probability mass: P(exactly k goals | average rate lambda). */
+function poissonP(lambda, k) {
+  return (Math.exp(-lambda) * Math.pow(lambda, k)) / factorial(k);
+}
+
+/**
+ * Correct-score model — genuinely statistical (Poisson), not a guess.
+ * Blends H2H-specific scoring (oriented to today's home/away) with each
+ * team's general recent attacking rate, applies a mild home boost, then
+ * scores every plausible line 0-0 through 6-6 and returns the most likely
+ * ones ranked. IMPORTANT: exact scorelines are inherently low-probability
+ * in football — even the best single pick is usually only 10-30% likely.
+ * This is normal and expected; treat the ranking, not the raw %, as the
+ * signal.
+ */
+export function correctScoreModel({ h2h, homeAttack, awayAttack }) {
+  const HOME_BOOST = 1.08;
+  const AWAY_DAMP = 0.94;
+
+  let lambdaHome = clamp(0.5 * h2h.avgHomeGoals + 0.5 * homeAttack, 0.3, 3.2) * HOME_BOOST;
+  let lambdaAway = clamp(0.5 * h2h.avgAwayGoals + 0.5 * awayAttack, 0.3, 3.2) * AWAY_DAMP;
+
+  const grid = [];
+  for (let i = 0; i <= 6; i++) {
+    for (let j = 0; j <= 6; j++) {
+      const p = poissonP(lambdaHome, i) * poissonP(lambdaAway, j);
+      grid.push({ score: `${i}-${j}`, p });
+    }
+  }
+  grid.sort((a, b) => b.p - a.p);
+
+  const top = grid[0];
+  const second = grid[1];
+  return {
+    top: { score: top.score, p: Math.round(top.p * 1000) / 10 },       // one decimal %
+    second: { score: second.score, p: Math.round(second.p * 1000) / 10 },
+    confidenceGap: Math.round((top.p - second.p) * 1000) / 10,          // bigger = clearer standout pick
+    lambdaHome: Math.round(lambdaHome * 100) / 100,
+    lambdaAway: Math.round(lambdaAway * 100) / 100,
+  };
 }
 
 /**
