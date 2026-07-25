@@ -59,6 +59,30 @@ export const teamForm      = (id, last = 10) =>
 export const budgetStatus = AF.budgetStatus;
 
 /**
+ * STATS-ONLY functions — always use football-data.org, never API-Football.
+ * Reason: API-Football's free plan restricts recent-season data (only
+ * 2022–2024 is included), which breaks current-season H2H/form. These
+ * also keep team IDs internally consistent (search + lookup both FD-space),
+ * avoiding the cross-provider ID mismatch bug.
+ */
+export async function statsSearchTeams(q) {
+  const r = await fdSearchTeams(q);
+  return { ...r, provider: "footballdata" };
+}
+export async function statsHeadToHead(a, b) {
+  const r = await fdHeadToHead(a, b);
+  return { ...r, provider: "footballdata" };
+}
+export async function statsTeamForm(id, last = 10) {
+  const r = await fdTeamForm(id, last);
+  return { ...r, provider: "footballdata" };
+}
+export async function statsFixturesToday() {
+  const r = await fdFixturesToday();
+  return { ...r, provider: "footballdata" };
+}
+
+/**
  * Provider-LOCKED lookups — used once a team search has already returned
  * IDs from a specific provider. IDs are NOT compatible across providers,
  * so these never cross-fallback; they just fail clearly if that provider
