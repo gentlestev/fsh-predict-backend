@@ -153,7 +153,16 @@ async function ensureDailyScan(limit) {
   }
 
   const { data } = await fixturesToday();
-  const majors = data.filter(isMajor).filter((f) => f.fixture.status.short === "NS");
+  // Include today's fixtures regardless of status — NOT just "not started".
+  // Reason: this in-memory scan resets on every redeploy. If it rebuilds
+  // AFTER a match has kicked off or finished, filtering to NS-only would
+  // silently drop it from every tab, even though it was correctly predicted
+  // and graded earlier. Finished/live matches are prioritized first so they
+  // survive the `limit` cutoff; upcoming fixtures fill the remaining slots.
+  const todaysMajors = data.filter(isMajor);
+  const decided = todaysMajors.filter((f) => ["1H","2H","HT","ET","FT"].includes(f.fixture.status.short));
+  const upcoming = todaysMajors.filter((f) => f.fixture.status.short === "NS");
+  const majors = [...decided, ...upcoming];
   const results = [];
 
   for (const f of majors.slice(0, limit)) {
@@ -217,7 +226,7 @@ function gradePick(fixtureMap, fixtureId, key) {
  */
 app.get("/api/top-predictions", async (req, res) => {
   try {
-    const limit = Math.min(Number(req.query.limit || 8), 12);
+    const limit = Math.min(Number(req.query.limit || 16), 24);
     const { results, fromCache } = await ensureDailyScan(limit);
     const fixtureMap = await todayFixtureMap();
 
@@ -255,7 +264,7 @@ app.get("/api/top-predictions", async (req, res) => {
  */
 app.get("/api/daily-bomb", async (req, res) => {
   try {
-    const limit = Math.min(Number(req.query.limit || 8), 12);
+    const limit = Math.min(Number(req.query.limit || 16), 24);
     const { results, fromCache } = await ensureDailyScan(limit);
     const fixtureMap = await todayFixtureMap();
 
@@ -295,7 +304,7 @@ app.get("/api/daily-bomb", async (req, res) => {
  */
 app.get("/api/correct-score", async (req, res) => {
   try {
-    const limit = Math.min(Number(req.query.limit || 8), 12);
+    const limit = Math.min(Number(req.query.limit || 16), 24);
     const { results, fromCache } = await ensureDailyScan(limit);
     const fixtureMap = await todayFixtureMap();
 
