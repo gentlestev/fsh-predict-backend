@@ -114,17 +114,18 @@ export function preMatchModel({ h2h, homeForm, awayForm }) {
 
   const pct = (x) => Math.round(x * 100);
 
-  // Derived markets
+  // Derived markets — each has a stable `key` (for grading against real
+  // results later) plus a display `name`.
   const markets = [
-    { name: "Home win", p: pct(pHome) },
-    { name: "Draw", p: pct(pDraw) },
-    { name: "Away win", p: pct(pAway) },
-    { name: "Home win or draw (1X)", p: pct(pHome + pDraw) },
-    { name: "Away win or draw (X2)", p: pct(pAway + pDraw) },
-    { name: "Both teams to score", p: pct(clamp(h2h.bttsRate, 0.15, 0.9)) },
-    { name: "Over 2.5 goals", p: pct(clamp(h2h.over25Rate, 0.15, 0.9)) },
-    { name: "Over 1.5 goals", p: pct(clamp(0.55 + h2h.avgGoals * 0.11, 0.4, 0.95)) },
-    { name: "Under 3.5 goals", p: pct(clamp(1 - (h2h.avgGoals - 2.2) * 0.18, 0.4, 0.92)) },
+    { key: "home_win", name: "Home win", p: pct(pHome) },
+    { key: "draw", name: "Draw", p: pct(pDraw) },
+    { key: "away_win", name: "Away win", p: pct(pAway) },
+    { key: "1x", name: "Home win or draw (1X)", p: pct(pHome + pDraw) },
+    { key: "x2", name: "Away win or draw (X2)", p: pct(pAway + pDraw) },
+    { key: "btts", name: "Both teams to score", p: pct(clamp(h2h.bttsRate, 0.15, 0.9)) },
+    { key: "over25", name: "Over 2.5 goals", p: pct(clamp(h2h.over25Rate, 0.15, 0.9)) },
+    { key: "over15", name: "Over 1.5 goals", p: pct(clamp(0.55 + h2h.avgGoals * 0.11, 0.4, 0.95)) },
+    { key: "under35", name: "Under 3.5 goals", p: pct(clamp(1 - (h2h.avgGoals - 2.2) * 0.18, 0.4, 0.92)) },
   ];
 
   return {
@@ -136,6 +137,30 @@ export function preMatchModel({ h2h, homeForm, awayForm }) {
 
 function clamp(x, lo, hi) {
   return Math.max(lo, Math.min(hi, x));
+}
+
+/** Grades a market key against the ACTUAL final score. Only call this once
+ *  the fixture is confirmed full-time — mid-match it's premature. */
+export function evaluateMarket(key, hg, ag) {
+  switch (key) {
+    case "home_win": return hg > ag;
+    case "draw": return hg === ag;
+    case "away_win": return ag > hg;
+    case "1x": return hg >= ag;
+    case "x2": return ag >= hg;
+    case "btts": return hg > 0 && ag > 0;
+    case "over25": return hg + ag > 2.5;
+    case "over15": return hg + ag > 1.5;
+    case "under35": return hg + ag < 3.5;
+    case "home_over15": return hg > 1.5;
+    case "away_over15": return ag > 1.5;
+    default: return null;
+  }
+}
+
+/** Grades an exact-scoreline pick (e.g. "2-1") against the final score. */
+export function evaluateCorrectScore(predictedScore, hg, ag) {
+  return predictedScore === `${hg}-${ag}`;
 }
 
 /** Average goals a team has scored in its own recent finished fixtures,
@@ -217,23 +242,23 @@ export function liveModel(liveFixture) {
   const out = [];
 
   if (lead >= 2) {
-    out.push({ market: `${home} win`, p: Math.round(clamp(0.72 + lead * 0.07 + timeFactor * 0.15, 0, 0.97) * 100) });
+    out.push({ key: "home_win", market: `${home} win`, p: Math.round(clamp(0.72 + lead * 0.07 + timeFactor * 0.15, 0, 0.97) * 100) });
   } else if (lead <= -2) {
-    out.push({ market: `${away} win`, p: Math.round(clamp(0.72 + Math.abs(lead) * 0.07 + timeFactor * 0.15, 0, 0.97) * 100) });
+    out.push({ key: "away_win", market: `${away} win`, p: Math.round(clamp(0.72 + Math.abs(lead) * 0.07 + timeFactor * 0.15, 0, 0.97) * 100) });
   } else if (lead === 1) {
-    out.push({ market: `${home} win or draw (1X)`, p: Math.round(clamp(0.68 + timeFactor * 0.24, 0, 0.96) * 100) });
+    out.push({ key: "1x", market: `${home} win or draw (1X)`, p: Math.round(clamp(0.68 + timeFactor * 0.24, 0, 0.96) * 100) });
   } else if (lead === -1) {
-    out.push({ market: `${away} win or draw (X2)`, p: Math.round(clamp(0.68 + timeFactor * 0.24, 0, 0.96) * 100) });
+    out.push({ key: "x2", market: `${away} win or draw (X2)`, p: Math.round(clamp(0.68 + timeFactor * 0.24, 0, 0.96) * 100) });
   }
 
   if (total >= 2 && minute <= 70) {
-    out.push({ market: "Over 2.5 goals", p: Math.round(clamp(0.60 + total * 0.09 + (70 - minute) * 0.003, 0, 0.95) * 100) });
+    out.push({ key: "over25", market: "Over 2.5 goals", p: Math.round(clamp(0.60 + total * 0.09 + (70 - minute) * 0.003, 0, 0.95) * 100) });
   }
   if (total === 0 && minute >= 40) {
-    out.push({ market: "Under 3.5 goals", p: Math.round(clamp(0.68 + timeFactor * 0.25, 0, 0.96) * 100) });
+    out.push({ key: "under35", market: "Under 3.5 goals", p: Math.round(clamp(0.68 + timeFactor * 0.25, 0, 0.96) * 100) });
   }
   if (total >= 1 && minute >= 60) {
-    out.push({ market: "Over 0.5 goals ✓ / next: Over 1.5", p: Math.round(clamp(0.55 + total * 0.18, 0, 0.95) * 100) });
+    out.push({ key: "home_over15", market: `${home} over 1.5 goals`, p: Math.round(clamp(0.55 + total * 0.18, 0, 0.95) * 100) });
   }
 
   return out.filter((x) => x.p >= 70).sort((a, b) => b.p - a.p);
