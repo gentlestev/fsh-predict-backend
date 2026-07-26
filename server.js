@@ -17,6 +17,8 @@ import {
   liveModel,
   teamAttackRate,
   correctScoreModel,
+  evaluateMarket,
+  evaluateCorrectScore,
 } from "./src/predictor.js";
 
 const app = express();
@@ -192,6 +194,24 @@ async function ensureDailyScan(limit) {
   return { results, fromCache: false };
 }
 
+/** Maps today's fixtures by ID so predictions can be graded against real
+ *  results — reuses the same cached fixturesToday() call, no extra cost. */
+async function todayFixtureMap() {
+  const { data } = await fixturesToday();
+  const map = new Map();
+  for (const f of data) map.set(f.fixture.id, f);
+  return map;
+}
+
+/** Grades one pick (by market key) against today's fixture map. Returns
+ *  null (pending) until the match is confirmed full-time. */
+function gradePick(fixtureMap, fixtureId, key) {
+  const f = fixtureMap.get(fixtureId);
+  if (!f || f.fixture.status.short !== "FT") return { result: null, finalScore: null };
+  const hg = f.goals.home, ag = f.goals.away;
+  return { result: evaluateMarket(key, hg, ag) ? "correct" : "wrong", finalScore: `${hg}-${ag}` };
+}
+
 /**
  * MENU 3 — Top predictions of the day (≥70% only). Reads the shared scan.
  */
@@ -199,11 +219,13 @@ app.get("/api/top-predictions", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit || 8), 12);
     const { results, fromCache } = await ensureDailyScan(limit);
+    const fixtureMap = await todayFixtureMap();
 
     const picks = [];
     for (const r of results) {
       for (const mk of r.markets) {
         if (mk.p >= 70) {
+          const { result, finalScore } = gradePick(fixtureMap, r.fixtureId, mk.key);
           picks.push({
             fixtureId: r.fixtureId,
             match: r.match,
@@ -211,6 +233,8 @@ app.get("/api/top-predictions", async (req, res) => {
             kickoff: r.kickoff,
             market: mk.name.replace("Home", r.homeName).replace("Away", r.awayName),
             p: mk.p,
+            result,      // "correct" | "wrong" | null (not finished yet)
+            finalScore,  // e.g. "2-1", or null if pending
           });
         }
       }
@@ -233,11 +257,13 @@ app.get("/api/daily-bomb", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit || 8), 12);
     const { results, fromCache } = await ensureDailyScan(limit);
+    const fixtureMap = await todayFixtureMap();
 
     const candidates = [];
     for (const r of results) {
       for (const mk of r.markets) {
         if (mk.p >= 8 && mk.p <= 42) {
+          const { result, finalScore } = gradePick(fixtureMap, r.fixtureId, mk.key);
           candidates.push({
             fixtureId: r.fixtureId,
             match: r.match,
@@ -246,6 +272,8 @@ app.get("/api/daily-bomb", async (req, res) => {
             market: mk.name.replace("Home", r.homeName).replace("Away", r.awayName),
             p: mk.p,
             impliedOdds: Math.round((100 / mk.p) * 100) / 100,
+            result,
+            finalScore,
           });
         }
       }
@@ -269,19 +297,30 @@ app.get("/api/correct-score", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit || 8), 12);
     const { results, fromCache } = await ensureDailyScan(limit);
+    const fixtureMap = await todayFixtureMap();
 
     const picks = results
       .filter((r) => r.correctScore)
-      .map((r) => ({
-        fixtureId: r.fixtureId,
-        match: r.match,
-        league: r.league,
-        kickoff: r.kickoff,
-        score: r.correctScore.top.score,
-        p: r.correctScore.top.p,
-        runnerUp: r.correctScore.second,
-        confidenceGap: r.correctScore.confidenceGap,
-      }))
+      .map((r) => {
+        const f = fixtureMap.get(r.fixtureId);
+        let result = null, finalScore = null;
+        if (f && f.fixture.status.short === "FT") {
+          finalScore = `${f.goals.home}-${f.goals.away}`;
+          result = evaluateCorrectScore(r.correctScore.top.score, f.goals.home, f.goals.away) ? "correct" : "wrong";
+        }
+        return {
+          fixtureId: r.fixtureId,
+          match: r.match,
+          league: r.league,
+          kickoff: r.kickoff,
+          score: r.correctScore.top.score,
+          p: r.correctScore.top.p,
+          runnerUp: r.correctScore.second,
+          confidenceGap: r.correctScore.confidenceGap,
+          result,
+          finalScore,
+        };
+      })
       .sort((a, b) => b.confidenceGap - a.confidenceGap);
 
     res.json({ fromCache, picks });
@@ -302,7 +341,45 @@ app.get("/api/live", async (_req, res) => {
   }
 });
 
-/** MENU 5 — Live predictions (after 25', ≥70% only). Also unfiltered. */
+/**
+ * MENU 5 — Live predictions (after 25', ≥70% only). Also unfiltered.
+ * Finished matches drop out of the live feed entirely, so a lightweight
+ * in-memory log remembers today's live picks and grades them once their
+ * fixture is confirmed full-time — this is what "history" below shows.
+ * Resets on server restart/redeploy (no database), which is an acceptable
+ * trade-off for a same-day, personal-scale feature.
+ */
+let livePredictionLog = [];
+const LIVE_LOG_MAX = 40;
+
+function logLivePrediction(fixture, pred) {
+  const existing = livePredictionLog.find(
+    (e) => e.fixtureId === fixture.fixture.id && e.key === pred.key
+  );
+  if (existing) { existing.p = pred.p; return; }
+  livePredictionLog.push({
+    fixtureId: fixture.fixture.id,
+    match: `${fixture.teams.home.name} vs ${fixture.teams.away.name}`,
+    market: pred.market,
+    key: pred.key,
+    p: pred.p,
+    graded: false,
+    result: null,
+    finalScore: null,
+  });
+  if (livePredictionLog.length > LIVE_LOG_MAX) livePredictionLog.shift();
+}
+
+async function gradeLiveLog() {
+  const pending = livePredictionLog.filter((e) => !e.graded);
+  if (pending.length === 0) return;
+  const fixtureMap = await todayFixtureMap();
+  for (const e of pending) {
+    const { result, finalScore } = gradePick(fixtureMap, e.fixtureId, e.key);
+    if (result) { e.graded = true; e.result = result; e.finalScore = finalScore; }
+  }
+}
+
 app.get("/api/live-predictions", async (_req, res) => {
   try {
     const { data, fromCache } = await fixturesLive();
@@ -311,9 +388,12 @@ app.get("/api/live-predictions", async (_req, res) => {
       const preds = liveModel(f);
       if (preds.length > 0) {
         results.push({ fixture: slimFixture(f), predictions: preds });
+        preds.forEach((pred) => logLivePrediction(f, pred));
       }
     }
-    res.json({ fromCache, results });
+    await gradeLiveLog();
+    const history = livePredictionLog.filter((e) => e.graded).slice(-10).reverse();
+    res.json({ fromCache, results, history });
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
