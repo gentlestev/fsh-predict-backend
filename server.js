@@ -238,6 +238,8 @@ app.get("/api/top-predictions", async (req, res) => {
           picks.push({
             fixtureId: r.fixtureId,
             match: r.match,
+            home: r.homeName,
+            away: r.awayName,
             league: r.league,
             kickoff: r.kickoff,
             market: mk.name.replace("Home", r.homeName).replace("Away", r.awayName),
@@ -276,6 +278,8 @@ app.get("/api/daily-bomb", async (req, res) => {
           candidates.push({
             fixtureId: r.fixtureId,
             match: r.match,
+            home: r.homeName,
+            away: r.awayName,
             league: r.league,
             kickoff: r.kickoff,
             market: mk.name.replace("Home", r.homeName).replace("Away", r.awayName),
@@ -320,6 +324,8 @@ app.get("/api/correct-score", async (req, res) => {
         return {
           fixtureId: r.fixtureId,
           match: r.match,
+          home: r.homeName,
+          away: r.awayName,
           league: r.league,
           kickoff: r.kickoff,
           score: r.correctScore.top.score,
