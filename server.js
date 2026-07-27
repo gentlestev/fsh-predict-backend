@@ -258,6 +258,85 @@ app.get("/api/top-predictions", async (req, res) => {
 });
 
 /**
+ * MENU — Daily Selection accumulators: builds a multi-leg combo targeting
+ * a specific combined-odds multiplier (3x, 10x, 50x, 100x, 500x, 1000x).
+ * Algorithm: take EACH fixture's single highest-probability market (never
+ * two legs from the same match), sort all candidates safest-first, then
+ * greedily add legs — cheapest risk first — until the target is reached.
+ * Bigger targets are mathematically impossible using only safe picks, so
+ * once the safe pool is exhausted it reaches further down the probability
+ * scale as needed. Capped at ACCA_MAX_LEGS so it never balloons absurdly.
+ * If today's fixtures genuinely can't reach a target, targetReached:false
+ * is returned honestly rather than padding with fake legs.
+ */
+const ACCA_TARGETS = [3, 10, 50, 100, 500, 1000];
+const ACCA_MAX_LEGS = 15;
+
+app.get("/api/accumulator", async (req, res) => {
+  try {
+    const target = Number(req.query.target);
+    if (!ACCA_TARGETS.includes(target)) {
+      return res.status(400).json({ error: `target must be one of ${ACCA_TARGETS.join(", ")}` });
+    }
+    const limit = Math.min(Number(req.query.limit || 16), 24);
+    const { results, fromCache } = await ensureDailyScan(limit);
+    const fixtureMap = await todayFixtureMap();
+
+    // One candidate leg per fixture: its single highest-probability market
+    // (preMatchModel already returns markets sorted p descending).
+    const candidates = results
+      .filter((r) => r.markets && r.markets.length)
+      .map((r) => {
+        const best = r.markets[0];
+        return {
+          fixtureId: r.fixtureId,
+          match: r.match,
+          home: r.homeName,
+          away: r.awayName,
+          league: r.league,
+          kickoff: r.kickoff,
+          market: best.name.replace("Home", r.homeName).replace("Away", r.awayName),
+          key: best.key,
+          p: best.p,
+          impliedOdds: Math.round((100 / best.p) * 100) / 100,
+        };
+      })
+      .sort((a, b) => b.p - a.p); // safest (highest probability) first
+
+    const legs = [];
+    let cumulative = 1;
+    for (const c of candidates) {
+      if (cumulative >= target || legs.length >= ACCA_MAX_LEGS) break;
+      legs.push(c);
+      cumulative *= c.impliedOdds;
+    }
+
+    // Grade each leg + the accumulator as a whole. A combo is "lost" the
+    // moment any single leg is wrong, "won" only once every leg is correct.
+    let anyWrong = false, allDecided = true;
+    const gradedLegs = legs.map((l) => {
+      const { result, finalScore } = gradePick(fixtureMap, l.fixtureId, l.key);
+      if (result === "wrong") anyWrong = true;
+      if (result === null) allDecided = false;
+      return { ...l, result, finalScore };
+    });
+    const overall = anyWrong ? "lost" : (allDecided && gradedLegs.length > 0) ? "won" : "pending";
+
+    res.json({
+      fromCache,
+      target,
+      legs: gradedLegs,
+      legCount: gradedLegs.length,
+      cumulativeOdds: Math.round(cumulative * 100) / 100,
+      targetReached: cumulative >= target,
+      overall, // "pending" | "won" | "lost"
+    });
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
+});
+
+/**
  * MENU 6 — Daily Bomb: the model's boldest long-shot picks of the day.
  * Deliberately LOW probability (8–42%) but backed by real signal (at least
  * 3 qualifying meetings) rather than pure noise. "Implied odds" here are a
