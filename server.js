@@ -311,6 +311,13 @@ app.get("/api/accumulator", async (req, res) => {
       cumulative *= c.impliedOdds;
     }
 
+    // A tier's own range is [target, nextTierTarget) — e.g. 3odd means
+    // 3.0–9.99x, not "3x or more" (that would just be whatever 10odd built).
+    // The last tier (1000) has no upper bound.
+    const tierIndex = ACCA_TARGETS.indexOf(target);
+    const upperBound = tierIndex < ACCA_TARGETS.length - 1 ? ACCA_TARGETS[tierIndex + 1] : Infinity;
+    const inRange = cumulative >= target && cumulative < upperBound;
+
     // Grade each leg + the accumulator as a whole. A combo is "lost" the
     // moment any single leg is wrong, "won" only once every leg is correct.
     let anyWrong = false, allDecided = true;
@@ -325,11 +332,15 @@ app.get("/api/accumulator", async (req, res) => {
     res.json({
       fromCache,
       target,
-      legs: gradedLegs,
-      legCount: gradedLegs.length,
+      upperBound: upperBound === Infinity ? null : upperBound,
+      inRange,
+      // Legs are only returned when the combo genuinely lands in this
+      // tier's own range — otherwise there's nothing honest to show.
+      legs: inRange ? gradedLegs : [],
+      legCount: inRange ? gradedLegs.length : 0,
       cumulativeOdds: Math.round(cumulative * 100) / 100,
       targetReached: cumulative >= target,
-      overall, // "pending" | "won" | "lost"
+      overall: inRange ? overall : "n/a",
     });
   } catch (e) {
     res.status(503).json({ error: e.message });
